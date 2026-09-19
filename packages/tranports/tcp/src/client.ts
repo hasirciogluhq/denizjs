@@ -61,6 +61,7 @@ export type TClientState = {
   // max 20 (this is basically a ring buffer shit :)
   givenErrors: Error[];
   socket: net.Socket | undefined;
+  reconnectAttempts: number;
 };
 
 // helpers
@@ -91,6 +92,7 @@ export class CTcpClient {
     lastErr: undefined,
     givenErrors: [],
     socket: undefined,
+    reconnectAttempts: 0,
   };
 
   private eventListeners: Record<string, (...args: any[]) => void> = {};
@@ -159,7 +161,7 @@ export class CTcpClient {
     }
   }
 
-  connect() {
+  async connect() {
     this.state.state = "connecting";
     this.state.connecting = true;
     this.state.disconnected = false;
@@ -192,6 +194,32 @@ export class CTcpClient {
     });
   }
 
+  async triggerReconnect() {
+    if (!this.preprocessedOptions?.lifecycle?.reConnect) {
+      return;
+    }
+
+    this.state.reconnectAttempts++;
+
+    if (
+      this.state.reconnectAttempts >
+      (this.preprocessedOptions?.lifecycle?.maxReconnectAttempts ?? 10)
+    ) {
+      this.error(new Error("Max reconnect attempts reached"));
+      this.resetState();
+      return;
+    }
+
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        this.preprocessedOptions?.lifecycle?.reconnectInterval ?? 1000,
+      ),
+    );
+
+    await this.connect();
+  }
+
   // in class helpers
   private addError(error: Error) {
     // set last error
@@ -212,6 +240,10 @@ export class CTcpClient {
     this.state.disconnected = true;
     this.state.lastErr = undefined;
     this.state.givenErrors = [];
+    if (this.state.socket) {
+      this.state.socket.destroy();
+    }
+
     this.state.socket = undefined;
   }
 
@@ -225,6 +257,8 @@ export class CTcpClient {
     this.state.socket = undefined;
 
     this.emit("close");
+
+    this.triggerReconnect();
   }
 
   private connected() {
@@ -245,9 +279,12 @@ export class CTcpClient {
 
     // emit the error event
     this.emit("error", error);
+
+    this.triggerReconnect();
   }
 
   private data(data: Buffer) {
+    // emit the data event
     this.emit("data", data);
   }
 }
